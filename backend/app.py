@@ -127,8 +127,12 @@ def create_registration():
         if code == "23505":
             return api_error("You are already registered for this event.", 409)
         app.logger.exception("Could not create registration")
+        if code == "23503":
+            return api_error("The user ID is not present in the database. Enter a valid user UUID.", 400)
+        if code == "42501":
+            return api_error("Supabase blocked the insert. Add an INSERT policy for the registrations table or configure a server-side service key.", 403)
         return api_error(
-            "The database rejected this registration. Check that the user ID is valid and that registrations allow inserts.",
+            f"The database rejected this registration ({code or 'unknown error'}). Check the user ID and registrations table constraints.",
             400,
         )
 
