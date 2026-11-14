@@ -1,6 +1,7 @@
 """Flask API for browsing events and managing event registrations."""
 
 import os
+from uuid import uuid4
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from postgrest import APIError
@@ -36,6 +37,9 @@ if not supabase_url or not supabase_key:
     raise RuntimeError("SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY must be set")
 
 supabase: Client = create_client(supabase_url, supabase_key)
+# Keep this key on the server only. It allows API writes when Supabase RLS blocks anon inserts.
+write_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or supabase_key
+supabase_writer: Client = create_client(supabase_url, write_key)
 
 
 def api_error(message, status):
@@ -45,6 +49,20 @@ def api_error(message, status):
 @app.get("/")
 def index():
     return jsonify({"message": "Events API is running"})
+
+
+@app.get("/api/users")
+def list_users():
+    role = request.args.get("role", "").strip().lower()
+    if role not in {"student", "organizer"}:
+        return api_error("role must be student or organizer.", 400)
+    try:
+        result = (supabase.table("users").select("id,email,role")
+                  .eq("role", role).order("email").execute())
+        return jsonify(result.data), 200
+    except APIError:
+        app.logger.exception("Could not list users for role %s", role)
+        return api_error("Could not load users.", 500)
 
 
 @app.get("/api/events")
@@ -65,6 +83,49 @@ def list_events():
     except APIError as error:
         app.logger.exception("Could not list events")
         return api_error("Could not load events.", 500)
+
+
+@app.post("/api/events")
+def create_event():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return api_error("Request body must be a JSON object.", 400)
+    title = str(body.get("title", "")).strip()
+    organizer_id = str(body.get("organizer_id", "")).strip()
+    try:
+        capacity = int(body.get("capacity"))
+    except (TypeError, ValueError):
+        return api_error("capacity must be a positive whole number.", 400)
+    if not title:
+        return api_error("title is required.", 400)
+    if capacity < 1:
+        return api_error("capacity must be at least 1.", 400)
+    if not organizer_id:
+        return api_error("organizer_id is required.", 400)
+    try:
+        user = (supabase.table("users").select("id")
+                .eq("id", organizer_id).eq("role", "organizer").limit(1).execute())
+        if not user.data:
+            return api_error("Choose a user whose database role is organizer.", 400)
+        result = supabase_writer.table("events").insert({
+            "id": str(uuid4()),
+            "organizer_id": organizer_id,
+            "title": title,
+            "capacity": capacity,
+            "status": "upcoming",
+        }).execute()
+        if not result.data:
+            return api_error("The event was not returned after insert. Check Supabase insert policies.", 500)
+        event = result.data[0]
+        event["registered_count"] = 0
+        event["remaining_capacity"] = capacity
+        return jsonify(event), 201
+    except APIError as error:
+        code = getattr(error, "code", None)
+        app.logger.exception("Could not create event")
+        if code == "42501":
+            return api_error("Supabase blocked event creation. Set SUPABASE_SERVICE_ROLE_KEY on the backend or add an INSERT policy for events.", 403)
+        return api_error(f"Could not create event ({code or 'database error'}). Check the event table constraints.", 400)
 
 
 @app.get("/api/events/<event_id>")
@@ -111,7 +172,7 @@ def create_registration():
         if capacity is not None and registration_count >= int(capacity):
             return api_error("This event is full.", 409)
 
-        result = (supabase.table("registrations")
+        result = (supabase_writer.table("registrations")
                   .insert({"event_id": event_id, "user_id": uid}).execute())
         new_count = registration_count + 1
         registration = result.data[0] if result.data else {
