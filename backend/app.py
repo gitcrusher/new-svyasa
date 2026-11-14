@@ -9,7 +9,7 @@ from supabase import Client, create_client
 
 load_dotenv()
 
-aaap = Flask(__name__)
+app = Flask(__name__)
 
 
 @app.after_request
