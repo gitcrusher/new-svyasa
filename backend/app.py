@@ -154,11 +154,13 @@ def create_registration():
         return api_error("user_id is required. Enter your database user ID in the frontend when prompted.", 400)
 
     try:
-        event_response = (supabase.table("events").select("id,capacity")
+        event_response = (supabase.table("events").select("id,capacity,organizer_id")
                           .eq("id", event_id).limit(1).execute())
         if not event_response.data:
             return api_error("Event not found.", 404)
         event = event_response.data[0]
+        if str(event.get("organizer_id")) == str(uid):
+            return api_error("Organizers cannot register for events they created.", 409)
 
         existing = (supabase.table("registrations").select("id")
                     .eq("event_id", event_id).eq("user_id", uid)
